@@ -1,10 +1,13 @@
 # References:
+    # https://gist.github.com/tarlen5/008809c3decf19313de216b9208f3734
+    # https://herbwood.tistory.com/2
     # https://herbwood.tistory.com/3
-    # https://github.com/KimRass/train_easyocr/blob/main/evaluate.py
 
 import torch
 from torchmetrics.detection import IntersectionOverUnion
 from torchvision.ops import box_iou
+from collections import defaultdict
+import numpy as np
 
 
 torch.set_printoptions(linewidth=70)
@@ -50,9 +53,61 @@ def get_giou(bbox1, bbox2):
     return torch.where(c == 0, -1, iou - ((c - union_area) / c))
 
 
+def get_accum_prec_and_recall(gt, pred, iou_thresh=0.5):
+    """
+    Args:
+        gt (
+            `torch.Tensor` with shape (B1, 5)
+            (Left, Top, Right, Bottom, Class)
+        )
+        pred (
+            `torch.Tensor` with shape (B2, 6)
+            (Left, Top, Right, Bottom, Confidence, Class)
+        )
+    """
+    assert gt.size(1) == 5
+    assert pred.size(1) == 6
+
+    is_same_cls = (gt[:, 4][:, None] == pred[:, 5][None, :])
+
+    iou = get_iou(gt[:, : 4], pred[:, : 4])
+    iou *= 8
+    meets_iou_thresh = (iou >= iou_thresh)
+
+    ious = dict()
+    for gt_idx, pred_idx in (is_same_cls & meets_iou_thresh).nonzero():
+        ious[pred_idx.item()] = (gt_idx.item(), iou[gt_idx, pred_idx].item())
+    ious = sorted(ious.items(), key=lambda x: x[1][1], reverse=True)
+    ious = {k: v for k, v in ious}
+
+    is_true = defaultdict(bool)
+    gt_is_matched = [False] * gt.size(0)
+    pred_is_matched = [False] * pred.size(0)
+    for pred_idx in range(pred.size(0)):
+    # for pred_idx in torch.argsort(pred[:, 4], dim=0, descending=True):
+    #     pred_idx = pred_idx.item()
+        if pred_idx in ious:
+            gt_idx = ious[pred_idx][0]
+            if (not gt_is_matched[gt_idx]) and (not pred_is_matched[pred_idx]):
+                is_true[pred_idx] = True
+            else:
+                is_true[pred_idx] = False
+        else:
+            is_true[pred_idx] = False
+
+    order = torch.argsort(pred[:, 4], dim=0, descending=True).tolist()
+    accum_tp = np.cumsum(np.array(list(is_true.values()))[order])
+    # accum_tp = np.cumsum(list(is_true.values()))
+    accum_fp = range(1, pred.size(0) + 1) - accum_tp
+
+    accum_prec = accum_tp / range(1, pred.size(0) + 1)
+    accum_recall = accum_fp / gt.size(0)
+    return accum_prec, accum_recall
+
+
 img_size = 64
 n_classes = 10
-n = 16
+n = 32
 m = 512
 iou_thresh = 0.5
 gt = torch.cat(
@@ -66,21 +121,78 @@ pred = torch.cat(
     [
         torch.randint(0, img_size, size=(m, 4)),
         torch.rand(size=(m, 1)),
-        torch.randn(size=(m, n_classes)),
+        torch.randint(0, n_classes, size=(m, 1)),
     ],
     dim=1,
 )
-pred[:, -n_classes:] = torch.softmax(pred[:, -n_classes:], dim=1)
+accum_prec, accum_recall = get_accum_prec_and_recall(gt, pred)
+accum_recall
+
+
+    meets_conf_thresh = (pred[:, 4] >= conf_thresh)
+
+    is_same_cls = (gt[:, 4][:, None] == pred[:, 5][None, :])
+
+    iou = get_iou(gt[:, : 4], pred[:, : 4])
+    iou *= 8
+    meets_iou_thresh = (iou >= iou_thresh)
+
+    ious = list()
+    for gt_idx, pred_idx in (is_same_cls & meets_iou_thresh).nonzero():
+        ious.append((gt_idx.item(), pred_idx.item(), iou[gt_idx, pred_idx].item()))
+    ious.sort(key=lambda x: x[2], reverse=True)
+
+    matched_gt_idx = list()
+    matched_pred_idx = list()
+    for gt_idx, pred_idx, iou in ious:
+        if (gt_idx not in matched_gt_idx) and (pred_idx not in matched_pred_idx):
+            matched_gt_idx.append(gt_idx)
+            matched_pred_idx.append(pred_idx)
+
+    tp = len(matched_gt_idx)
+    fp = pred.size(0) - tp
+    fn = gt.size(0) - len(matched_gt_idx)
+
+    prec = tp / (tp + fp)
+    recall = tp / (tp + fn)
+    if prec + recall == 0:
+        return 0
+    return 2 * (prec * recall) / (prec + recall)
+
+
+get_f1_score(gt, pred, iou_thresh=0.5)
+
+
+
+
+
+
+
+
+
+
 sorted_pred = pred[torch.sort(pred[:, 4], dim=0, descending=True)[1]]
 
-gt_bbox = gt[gt[:, 4] == c][:, : 4]
-pred_bbox = sorted_pred[torch.argmax(sorted_pred[:, -n_classes:], dim=1) == c][:, : 4]
-iou = get_iou(gt[:, : 4], sorted_pred[:, : 4])
-iou *= 10
 
-for pred_idx in range(pred_bbox.size(0)):
+
+
+# gt_bbox = gt[gt[:, 4] == c][:, : 4]
+# pred_bbox = sorted_pred[torch.argmax(sorted_pred[:, -n_classes:], dim=1) == c][:, : 4]
+
+for pred_idx, gt_idx in (
+    (gt[:, 4][:, None] == le_pred[:, 5][None, :]) & (iou >= iou_thresh)
+).nonzero():
+    print(pred_idx, gt_idx)
+    print(le_pred[pred_idx])
+
+
+for pred_idx in range(pred.size(0)):
     # pred_bbox[pred_idx]
-    pred_idx = 3
+    # pred_idx = 3
+    if (iou[:, pred_idx] >= iou_thresh).sum().item() == 0:
+        continue
+        # break
+    pred_idx
     gt[iou[:, pred_idx] >= iou_thresh]
 
 
